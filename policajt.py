@@ -91,7 +91,12 @@ def play_mp3(mp3_path: str) -> None:
 
 
 # --- Email -------------------------------------------------------------------
-def send_email(subject: str, body: str) -> None:
+def send_email(
+    subject: str,
+    body: str,
+    image_bytes: bytes | None = None,
+    image_name: str = "snapshot.jpg",
+) -> None:
     if not (SMTP_USER and SMTP_PASSWORD and EMAIL_TO):
         LOG.warning("SMTP credentials or recipient missing; skipping email")
         return
@@ -101,6 +106,13 @@ def send_email(subject: str, body: str) -> None:
     msg["From"] = EMAIL_FROM
     msg["To"] = EMAIL_TO
     msg.set_content(body)
+    if image_bytes:
+        msg.add_attachment(
+            image_bytes,
+            maintype="image",
+            subtype="jpeg",
+            filename=image_name,
+        )
 
     try:
         context = ssl.create_default_context()
@@ -113,10 +125,21 @@ def send_email(subject: str, body: str) -> None:
         LOG.error("Failed to send email: %s", exc)
 
 
-def send_email_async(subject: str, body: str) -> None:
+def send_email_async(
+    subject: str,
+    body: str,
+    image_bytes: bytes | None = None,
+) -> None:
     threading.Thread(
-        target=send_email, args=(subject, body), daemon=True
+        target=send_email,
+        args=(subject, body, image_bytes),
+        daemon=True,
     ).start()
+
+
+def encode_jpeg(frame: np.ndarray) -> bytes | None:
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    return buf.tobytes() if ok else None
 
 
 # --- Motion detection --------------------------------------------------------
@@ -233,12 +256,15 @@ def run() -> int:
 
             # Fire alert once per second while active.
             if now < alert_until and now - last_alert_tick >= 1.0:
+                first_tick = last_alert_tick == 0.0
                 last_alert_tick = now
-                if audio_ok:
+                if audio_ok and first_tick:
                     play_mp3(MP3_PATH)
+                image_bytes = encode_jpeg(frame) if first_tick else None
                 send_email_async(
                     subject="Motion detected",
                     body=f"Motion detected at {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                    image_bytes=image_bytes,
                 )
 
             prev_frame = processed
