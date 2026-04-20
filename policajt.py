@@ -234,7 +234,7 @@ def run() -> int:
             # Fire alert once per second while active.
             if now < alert_until and now - last_alert_tick >= 1.0:
                 last_alert_tick = now
-                if audio_ok and now - last_alert_tick >= 3.0:
+                if audio_ok:
                     play_mp3(MP3_PATH)
                 send_email_async(
                     subject="Motion detected",
