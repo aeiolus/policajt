@@ -36,6 +36,7 @@ LOG = logging.getLogger("policajt")
 
 # --- Configuration -----------------------------------------------------------
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
+CAMERA_MAX_SCAN = int(os.getenv("CAMERA_MAX_SCAN", "5"))  # indices to try if CAMERA_INDEX fails
 CHECK_INTERVAL_SEC = float(os.getenv("CHECK_INTERVAL_SEC", "1.0"))
 ALERT_DURATION_SEC = float(os.getenv("ALERT_DURATION_SEC", "5.0"))
 MOTION_THRESHOLD = float(os.getenv("MOTION_THRESHOLD", "5.0"))  # % of changed pixels
@@ -134,6 +135,49 @@ def detect_motion(prev: np.ndarray, curr: np.ndarray) -> bool:
     return changed_ratio >= MOTION_THRESHOLD
 
 
+def _backends() -> list[tuple[str, int]]:
+    """Platform-appropriate capture backends to try, most preferred first."""
+    if sys.platform == "darwin":
+        names = [("AVFOUNDATION", "CAP_AVFOUNDATION"), ("ANY", "CAP_ANY")]
+    elif sys.platform.startswith("win"):
+        names = [
+            ("DSHOW", "CAP_DSHOW"),
+            ("MSMF", "CAP_MSMF"),
+            ("ANY", "CAP_ANY"),
+        ]
+    else:
+        names = [("V4L2", "CAP_V4L2"), ("ANY", "CAP_ANY")]
+    result = []
+    for label, attr in names:
+        val = getattr(cv2, attr, None)
+        if val is not None:
+            result.append((label, val))
+    return result
+
+
+def open_camera() -> cv2.VideoCapture | None:
+    """Try the configured index across multiple backends, then scan others."""
+    backends = _backends()
+    indices = [CAMERA_INDEX] + [
+        i for i in range(CAMERA_MAX_SCAN) if i != CAMERA_INDEX
+    ]
+    for idx in indices:
+        for label, backend in backends:
+            cap = cv2.VideoCapture(idx, backend)
+            if cap.isOpened():
+                # Verify a frame actually comes through; some backends open
+                # a device but then never deliver frames.
+                ok, _ = cap.read()
+                if ok:
+                    LOG.info("Opened camera index %d via %s", idx, label)
+                    return cap
+                cap.release()
+            else:
+                cap.release()
+            LOG.debug("Camera index %d failed on backend %s", idx, label)
+    return None
+
+
 def grab_frame(cap: cv2.VideoCapture) -> np.ndarray | None:
     # Flush buffer to get the most recent frame.
     for _ in range(3):
@@ -151,12 +195,17 @@ def run() -> int:
 
     audio_ok = init_audio(MP3_PATH)
 
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    if not cap.isOpened():
-        LOG.error("Cannot open camera index %d", CAMERA_INDEX)
+    cap = open_camera()
+    if cap is None:
+        LOG.error(
+            "No working camera found (tried indices 0..%d). "
+            "Check that another app isn't using the camera, that OS permissions "
+            "are granted, and try setting CAMERA_INDEX explicitly.",
+            CAMERA_MAX_SCAN - 1,
+        )
         return 1
 
-    LOG.info("Watching camera %d (Ctrl+C to stop)...", CAMERA_INDEX)
+    LOG.info("Watching camera (Ctrl+C to stop)...")
 
     prev_frame = None
     alert_until = 0.0
